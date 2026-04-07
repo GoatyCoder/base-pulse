@@ -3,7 +3,7 @@ import { base } from 'wagmi/chains';
 
 export const config = getDefaultConfig({
   appName: 'BasePulse OnChain',
-  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID', // Prendilo gratis su cloud.walletconnect.com
+  projectId: 'ddf172d3592beb62f5681b0f82c3574d', // Prendilo gratis su cloud.walletconnect.com
   chains: [base],
   ssr: true,
 });
