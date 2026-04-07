@@ -1,16 +1,17 @@
 "use client";
+import Image from 'next/image';
 import '@rainbow-me/rainbowkit/styles.css';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { RainbowKitProvider } from '@rainbow-me/rainbowkit';
-import { WagmiProvider, useAccount, useReadContract, useWriteContract } from 'wagmi';
+import { WagmiProvider, useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { config } from '../config';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { waitForTransactionReceipt } from '@wagmi/core';
 import { BaseError, isAddress, parseEther } from 'viem';
 
 const queryClient = new QueryClient();
-const CONTRACT_ADDRESS = "0xC41581Cc82446374f882d699B5a680229d3D2295";
+const CONTRACT_ADDRESS = '0xC41581Cc82446374f882d699B5a680229d3D2295' as const;
 const ABI = [
   {
     inputs: [{ internalType: 'string', name: '_status', type: 'string' }],
@@ -36,15 +37,70 @@ const ABI = [
     ],
     stateMutability: 'view',
     type: 'function'
+  },
+  {
+    inputs: [{ internalType: 'string', name: '_status', type: 'string' }],
+    name: 'setStatus',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function'
+  },
+  {
+    inputs: [{ internalType: 'uint256', name: 'tokenId', type: 'uint256' }],
+    name: 'tokenURI',
+    outputs: [{ internalType: 'string', name: '', type: 'string' }],
+    stateMutability: 'view',
+    type: 'function'
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: 'address', name: 'user', type: 'address' },
+      { indexed: false, internalType: 'uint256', name: 'tokenId', type: 'uint256' },
+      { indexed: false, internalType: 'string', name: 'status', type: 'string' }
+    ],
+    name: 'ProfileMinted',
+    type: 'event'
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: 'address', name: 'user', type: 'address' },
+      { indexed: false, internalType: 'string', name: 'newStatus', type: 'string' }
+    ],
+    name: 'StatusUpdated',
+    type: 'event'
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: 'address', name: 'from', type: 'address' },
+      { indexed: true, internalType: 'address', name: 'to', type: 'address' },
+      { indexed: false, internalType: 'uint256', name: 'amount', type: 'uint256' }
+    ],
+    name: 'TipSent',
+    type: 'event'
   }
 ] as const;
 
+type ActivityItem = {
+  id: string;
+  blockNumber: bigint;
+  text: string;
+};
+
 function AppContent() {
   const { address, isConnected } = useAccount();
+  const publicClient = usePublicClient();
   const [profileStatus, setProfileStatus] = useState("");
+  const [newStatus, setNewStatus] = useState("");
   const [tipTo, setTipTo] = useState("");
   const [amount, setAmount] = useState("0.001");
   const [uiMessage, setUiMessage] = useState("");
+  const [tokenId, setTokenId] = useState<bigint | null>(null);
+  const [tokenUri, setTokenUri] = useState('');
+  const [tokenImage, setTokenImage] = useState('');
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
 
   // Legge i dati del profilo dal mapping pubblico
   const { data: profile, refetch: refetchProfile } = useReadContract({
@@ -56,6 +112,139 @@ function AppContent() {
   });
 
   const { writeContractAsync, isPending } = useWriteContract();
+
+  const decodeTokenUri = (uri: string) => {
+    if (!uri.startsWith('data:application/json;base64,')) {
+      setTokenImage('');
+      return;
+    }
+
+    try {
+      const encodedJson = uri.split(',')[1] ?? '';
+      const decodedJson = JSON.parse(atob(encodedJson)) as { image?: string };
+      setTokenImage(decodedJson.image ?? '');
+    } catch {
+      setTokenImage('');
+    }
+  };
+
+  const loadNftPreview = useCallback(async (user: `0x${string}`) => {
+    if (!publicClient) return;
+
+    const profileMintedLogs = await publicClient.getLogs({
+      address: CONTRACT_ADDRESS,
+      event: ABI[5],
+      args: { user },
+      fromBlock: BigInt(0),
+      toBlock: 'latest'
+    });
+
+    if (profileMintedLogs.length === 0) {
+      setTokenId(null);
+      setTokenUri('');
+      setTokenImage('');
+      return;
+    }
+
+    const mintedTokenId = profileMintedLogs[profileMintedLogs.length - 1].args.tokenId as bigint;
+    setTokenId(mintedTokenId);
+
+    const uri = await publicClient.readContract({
+      address: CONTRACT_ADDRESS,
+      abi: ABI,
+      functionName: 'tokenURI',
+      args: [mintedTokenId]
+    });
+
+    setTokenUri(uri);
+    decodeTokenUri(uri);
+  }, [publicClient]);
+
+  const loadActivity = useCallback(async (user: `0x${string}`) => {
+    if (!publicClient) return;
+
+    const [minted, statusUpdated, tipsSent, tipsReceived] = await Promise.all([
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: ABI[5],
+        args: { user },
+        fromBlock: BigInt(0),
+        toBlock: 'latest'
+      }),
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: ABI[6],
+        args: { user },
+        fromBlock: BigInt(0),
+        toBlock: 'latest'
+      }),
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: ABI[7],
+        args: { from: user },
+        fromBlock: BigInt(0),
+        toBlock: 'latest'
+      }),
+      publicClient.getLogs({
+        address: CONTRACT_ADDRESS,
+        event: ABI[7],
+        args: { to: user },
+        fromBlock: BigInt(0),
+        toBlock: 'latest'
+      })
+    ]);
+
+    const mapped: ActivityItem[] = [
+      ...minted.map(log => ({
+        id: `${log.transactionHash}-${log.logIndex}`,
+        blockNumber: log.blockNumber ?? BigInt(0),
+        text: `NFT mintato (token #${String(log.args.tokenId ?? '')})`
+      })),
+      ...statusUpdated.map(log => ({
+        id: `${log.transactionHash}-${log.logIndex}`,
+        blockNumber: log.blockNumber ?? BigInt(0),
+        text: `Status aggiornato: ${String(log.args.newStatus ?? '')}`
+      })),
+      ...tipsSent.map(log => ({
+        id: `${log.transactionHash}-${log.logIndex}`,
+        blockNumber: log.blockNumber ?? BigInt(0),
+        text: `Mancia inviata a ${String(log.args.to ?? '').slice(0, 10)}... (${Number(log.args.amount ?? BigInt(0)) / 1e18} ETH)`
+      })),
+      ...tipsReceived.map(log => ({
+        id: `${log.transactionHash}-${log.logIndex}`,
+        blockNumber: log.blockNumber ?? BigInt(0),
+        text: `Mancia ricevuta da ${String(log.args.from ?? '').slice(0, 10)}... (${Number(log.args.amount ?? BigInt(0)) / 1e18} ETH)`
+      }))
+    ];
+
+    const unique = new Map<string, ActivityItem>();
+    mapped.forEach(item => unique.set(item.id, item));
+
+    setActivity(
+      Array.from(unique.values())
+        .sort((a, b) => Number(b.blockNumber - a.blockNumber))
+        .slice(0, 8)
+    );
+  }, [publicClient]);
+
+  const refreshOnchainData = useCallback(async () => {
+    if (!address) return;
+
+    await refetchProfile();
+    await Promise.all([loadNftPreview(address), loadActivity(address)]);
+  }, [address, refetchProfile, loadActivity, loadNftPreview]);
+
+  useEffect(() => {
+    if (!address || !publicClient) return;
+
+    const timeoutId = setTimeout(() => {
+      void refetchProfile();
+      void loadNftPreview(address);
+      void loadActivity(address);
+    }, 0);
+
+    return () => clearTimeout(timeoutId);
+  }, [address, publicClient, refetchProfile, loadNftPreview, loadActivity]);
 
   const getErrorMessage = (error: unknown) => {
     if (error instanceof BaseError) {
@@ -87,7 +276,33 @@ function AppContent() {
 
       setUiMessage('Profilo NFT mintato con successo.');
       setProfileStatus('');
-      await refetchProfile();
+      await refreshOnchainData();
+    } catch (error) {
+      setUiMessage(getErrorMessage(error));
+    }
+  };
+
+  const updateStatus = async () => {
+    if (!newStatus.trim()) {
+      setUiMessage('Inserisci un nuovo status.');
+      return;
+    }
+
+    try {
+      setUiMessage('Conferma l\'aggiornamento status nel wallet...');
+      const hash = await writeContractAsync({
+        address: CONTRACT_ADDRESS,
+        abi: ABI,
+        functionName: 'setStatus',
+        args: [newStatus]
+      });
+
+      setUiMessage(`Tx inviata: ${hash.slice(0, 10)}... In attesa di conferma on-chain...`);
+      await waitForTransactionReceipt(config, { hash });
+
+      setUiMessage('Status aggiornato con successo.');
+      setNewStatus('');
+      await refreshOnchainData();
     } catch (error) {
       setUiMessage(getErrorMessage(error));
     }
@@ -113,7 +328,7 @@ function AppContent() {
       await waitForTransactionReceipt(config, { hash });
 
       setUiMessage('Mancia inviata con successo.');
-      await refetchProfile();
+      await refreshOnchainData();
     } catch (error) {
       setUiMessage(getErrorMessage(error));
     }
@@ -136,6 +351,21 @@ function AppContent() {
                 <div className="space-y-2">
                   <p className="bg-zinc-100 p-3 rounded-xl italic">&ldquo;{profile[0]}&rdquo;</p>
                   <p className="text-sm text-zinc-500">Mance totali: {Number(profile[1]) / 1e18} ETH</p>
+                  <div className="pt-3 space-y-2">
+                    <input
+                      placeholder="Nuovo status"
+                      className="w-full border p-3 rounded-xl"
+                      value={newStatus}
+                      onChange={e => setNewStatus(e.target.value)}
+                    />
+                    <button
+                      onClick={updateStatus}
+                      disabled={isPending}
+                      className="w-full bg-zinc-900 text-white p-3 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Aggiorna Status
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -162,6 +392,63 @@ function AppContent() {
               <input placeholder="Indirizzo (0x...)" className="w-full bg-zinc-800 p-3 rounded-xl mb-3 text-white" onChange={e => setTipTo(e.target.value)} />
               <input type="number" step="0.001" className="w-full bg-zinc-800 p-3 rounded-xl mb-3 text-white" value={amount} onChange={e => setAmount(e.target.value)} />
               <button onClick={sendTip} disabled={isPending} className="w-full bg-green-500 text-black p-3 rounded-xl font-bold disabled:opacity-50 disabled:cursor-not-allowed">Invia ETH</button>
+            </div>
+
+            <div className="bg-white text-black p-6 rounded-3xl shadow-xl border border-zinc-200">
+              <h2 className="text-xl font-bold mb-3">NFT On-Chain</h2>
+              {tokenId !== null ? (
+                <div className="space-y-3">
+                  <p className="text-sm text-zinc-500">Token ID: #{String(tokenId)}</p>
+                  {tokenImage ? (
+                    <Image
+                      src={tokenImage}
+                      alt="Anteprima NFT BasePulse"
+                      width={350}
+                      height={350}
+                      unoptimized
+                      className="w-full rounded-2xl border border-zinc-200 bg-zinc-100"
+                    />
+                  ) : (
+                    <p className="text-sm text-zinc-500">Immagine non disponibile.</p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href={`https://basescan.org/token/${CONTRACT_ADDRESS}?a=${String(tokenId)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-block px-3 py-2 text-xs font-semibold rounded-lg bg-zinc-100 border border-zinc-300"
+                    >
+                      Apri su BaseScan
+                    </a>
+                    <a
+                      href={`https://opensea.io/assets/base/${CONTRACT_ADDRESS}/${String(tokenId)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-block px-3 py-2 text-xs font-semibold rounded-lg bg-zinc-100 border border-zinc-300"
+                    >
+                      Apri su OpenSea
+                    </a>
+                  </div>
+                  {tokenUri && (
+                    <p className="text-xs text-zinc-500 break-all">tokenURI: {tokenUri.slice(0, 100)}...</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">Nessun NFT trovato per questo wallet.</p>
+              )}
+            </div>
+
+            <div className="bg-white text-black p-6 rounded-3xl shadow-xl border border-zinc-200">
+              <h2 className="text-xl font-bold mb-3">Attivita On-Chain</h2>
+              {activity.length ? (
+                <ul className="space-y-2 text-sm text-zinc-700">
+                  {activity.map(item => (
+                    <li key={item.id} className="bg-zinc-100 p-3 rounded-xl">{item.text}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-zinc-500">Nessun evento trovato.</p>
+              )}
             </div>
 
             {uiMessage && (
