@@ -1,5 +1,6 @@
 "use client";
 import Image from 'next/image';
+import Link from 'next/link';
 import '@rainbow-me/rainbowkit/styles.css';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { RainbowKitProvider } from '@rainbow-me/rainbowkit';
@@ -347,6 +348,14 @@ function AppContent() {
             {/* Box Profilo */}
             <div className="bg-white text-black p-6 rounded-3xl shadow-xl border border-zinc-200">
               <h2 className="text-xl font-bold mb-4">Il tuo Profilo</h2>
+              {address && (
+                <div className="mb-4">
+                  <p className="text-xs text-zinc-500 mb-2">Link condivisibile</p>
+                  <Link href={`/u/${address}`} className="text-sm text-[#0052FF] font-semibold break-all">
+                    /u/{address}
+                  </Link>
+                </div>
+              )}
               {profile && profile[2] ? (
                 <div className="space-y-2">
                   <p className="bg-zinc-100 p-3 rounded-xl italic">&ldquo;{profile[0]}&rdquo;</p>
